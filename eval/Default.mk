@@ -1,14 +1,16 @@
+
 DTHREADS_HOME=../../..
 
 NCORES ?= 8
 
-#CC = gcc -m32 -march=core2 -mtune=core2
-#CXX = g++ -m32 -march=core2 -mtune=core2
-CC = gcc -march=core2 -mtune=core2
-CXX = g++ -march=core2 -mtune=core2
+CC = gcc -m32 -march=core2 -mtune=core2
+CXX = g++ -m32 -march=core2 -mtune=core2
+#CC = gcc -march=core2 -mtune=core2
+#CXX = g++ -march=core2 -mtune=core2
 CFLAGS += -O5
 
-CONFIGS = pthread dthread dmp_o dmp_b
+CONFIGS = pthread dthread
+#CONFIGS = pthread dthread dmp_o dmp_b
 PROGS = $(addprefix $(TEST_NAME)-, $(CONFIGS))
 
 .PHONY: default all clean
@@ -48,8 +50,8 @@ eval-pthread: $(TEST_NAME)-pthread
 ############ dthread builders ############
 
 DTHREAD_CFLAGS = $(CFLAGS) -DNDEBUG
-DTHREAD_LIBS += $(LIBS) -rdynamic $(DTHREADS_HOME)/src/libdthreads64.so -ldl
-#DTHREAD_LIBS += $(LIBS) -rdynamic $(DTHREADS_HOME)/src/libdthreads.so -ldl
+#DTHREAD_LIBS += $(LIBS) -rdynamic $(DTHREADS_HOME)/src/libdthreads64.so -ldl
+DTHREAD_LIBS += $(LIBS) -rdynamic $(DTHREADS_HOME)/src/libdthreads32.so -ldl
 
 DTHREAD_OBJS = $(addprefix obj/, $(addsuffix -dthread.o, $(TEST_FILES)))
 
@@ -66,7 +68,7 @@ obj/%-dthread.o: %.cpp
 	$(CXX) $(DTHREAD_CFLAGS) -c $< -o $@ -I$(HOME)/include
 
 ### FIXME, put the 
-$(TEST_NAME)-dthread: $(DTHREAD_OBJS) $(DTHREADS_HOME)/src/libdthreads.so
+$(TEST_NAME)-dthread: $(DTHREAD_OBJS) $(DTHREADS_HOME)/src/libdthreads32.so
 	$(CC) $(DTHREAD_CFLAGS) -o $@ $(DTHREAD_OBJS) $(DTHREAD_LIBS)
 
 eval-dthread: $(TEST_NAME)-dthread
@@ -82,7 +84,7 @@ COREDET_OPT = -load=libLLVMDataStructure.so -load=libLLVMMakeDeterministic.so -b
 COREDET_RUNTIME = library-barrier library-cv library-mutex library-once library-rwlock library-semaphore library-thread runtime-main runtime-profiling runtime-sched runtime-wb debug
 
 obj/static-ctor.bc: $(HOME)/coredet/static-ctor.ll
-	llvm-as -f -o $@ $<
+	llvm-as-3.1 -f -o $@ $<
 
 ############ dmp-o builders ############
 
@@ -118,7 +120,7 @@ obj/%-dmp_o.runtime.bc: $(HOME)/coredet/%.cpp
 	$(CC) -emit-llvm $(DMP_O_CFLAGS) -c $< -o $@
 
 obj/$(TEST_NAME)-dmp_o.complete.bc: $(DMP_O_OBJS)
-	llvm-link -f -o $@ $(DMP_O_OBJS)
+	llvm-link-3.1 -f -o $@ $(DMP_O_OBJS)
 	opt $(DMP_O_OPT) -o $@ -f $@
 
 $(TEST_NAME)-dmp_o: obj/$(TEST_NAME)-dmp_o.complete.bc $(DMP_O_RUNTIME_OBJS)
