@@ -1,2 +1,2 @@
 HOME=../..
-DATASET_HOME=../datasets
+DATASET_HOME=../../datasets
