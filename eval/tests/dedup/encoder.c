@@ -1,8 +1,3 @@
-#if defined(ENABLE_DMP)
-#include "dmp.h"
-#endif
-
-
 #include "util.h"
 #include "dedupdef.h"
 #include "encoder.h"
@@ -27,6 +22,8 @@
 #define MSB64 INT64(0x8000000000000000ULL)
 
 #define INITIAL_SIZE 4096
+
+#define SLEEP_TIME 0
 
 extern config * conf;
 
@@ -114,36 +111,43 @@ void sub_Compress(send_buf_item * item) {
       if(key == NULL) {
         EXIT_TRACE("Memory allocation failed.\n");
       }
-	  //fprintf(stderr, "process %d : allocated key %p\n", getpid(), key);
       memcpy(key, item->sha1, sizeof(u_char)*SHA1_LEN);
+
       //Calc_SHA1Sig(item->content, body->len, key);
       struct hash_entry * entry;
       /* search the cache */
 #ifdef PARALLEL
       pthread_mutex_t *ht_lock = hashtable_getlock(cache, (void *)key);
+      //printf("%d sub_compress lock\n", getpid());
       pthread_mutex_lock(ht_lock);
 #endif
       if ((entry = hashtable_search(cache, (void *)key)) == NULL) {
         //if cannot find the entry, error
-        printf("Error: Compress hash error\n");
+        //printf("Error: Compress hash error\n");
+	//printf("SEARCH KEY IS GONE: %d %d %p %p\n", *((unsigned int *)key), getpid(), item, item->sha1);
         exit(1);
       } else {
         //if cache hit, put the compressed data in the hash
-        //There is a memory leak here. 
         //free(item->sha1);
         item->sha1 = NULL;
         struct pContent * value = ((struct pContent *)entry->v);
+
+	/*if (*((unsigned long *)key) == 2202839138){
+	  printf("HUH KEY FOUND it!!! %p pid %d \n", entry, getpid());
+	  }*/
         value->len = len;
         value->content = pstr;
         value->tag = TAG_DATAREADY;
 
         hashtable_change(entry, (void *)value);
 #ifdef PARALLEL
+	//printf("%d sub_compress signal\n", getpid());
         pthread_cond_signal(&value->empty);
 #endif
       }
 
 #ifdef PARALLEL
+      //printf("%d sub_compress unlock\n", getpid());
     pthread_mutex_unlock(ht_lock);
 #endif
 
@@ -164,8 +168,10 @@ void *Compress(void * targs) {
   send_buf_item * item;
   send_buf_item ** fetchbuf;
 
-  fprintf(stderr, "%d : Compress\n", getpid()); 
+  //printf("Compress %d\n", getpid());
+
   fetchbuf = (send_buf_item **)malloc(sizeof(send_buf_item *)*ITEM_PER_FETCH);
+  sleep(SLEEP_TIME);  
   if(fetchbuf == NULL) {
     EXIT_TRACE("Memory allocation failed.\n");
   }
@@ -177,6 +183,7 @@ void *Compress(void * targs) {
   while(1) {
     //get items from the queue
     if (fetch_count == fetch_start) {
+      //printf("%d compress dequeue 1\n", getpid());
       int r = dequeue(&compress_que[qid], &fetch_count, (void **)fetchbuf);
       if (r < 0) break;
 
@@ -188,6 +195,9 @@ void *Compress(void * targs) {
     fetch_start ++;
 
     if (item == NULL) break;
+ 
+    //printf("ITEM: %p %p %d\n", (char *)(*((unsigned long *)item->content)), item, getpid());
+   
 
     sub_Compress(item);
 
@@ -196,11 +206,13 @@ void *Compress(void * targs) {
     
     //put the item in the next queue for the write thread
     if (tmp_count >= ITEM_PER_INSERT) {      
+      //printf("%d compress enqueue 1\n", getpid());
       enqueue(&send_que[qid], &tmp_count, (void **)tmpbuf);
     }
   }
  
   if (tmp_count > 0) {
+    //printf("%d compress enqueue 2\n", getpid());
     enqueue(&send_que[qid], &tmp_count, (void **)tmpbuf);
   }
   
@@ -212,13 +224,7 @@ void *Compress(void * targs) {
   return NULL;
 }
 
-//This process is trying to calculate the hash value at first.
-// Then it will search the hash table to find whether this chunk has been
-// in process. If it is not in hash table, put it in the hashtable and the queue for
-// the compress thread.
-// If current chunk has already in the hash table, put the item into the queue for the write thread.
-// But before that, we should know that there is one more count, so we modify value->count and put it back?
-send_buf_item * sub_ChunkProcess(data_chunk chunk) {
+send_buf_item * sub_ChunkProcess(data_chunk chunk, int seq) {
   send_buf_item * item;
   send_body * body = NULL;
   u_char * key;
@@ -235,6 +241,7 @@ send_buf_item * sub_ChunkProcess(data_chunk chunk) {
   /* search the cache */
 #ifdef PARALLEL
   pthread_mutex_t *ht_lock = hashtable_getlock(cache, (void *)key);
+  //printf("%d sub_chunck lock\n", getpid());
   pthread_mutex_lock(ht_lock);
 #endif
   if ((entry = hashtable_search(cache, (void *)key)) == NULL) {
@@ -249,10 +256,10 @@ send_buf_item * sub_ChunkProcess(data_chunk chunk) {
     value->count = 1;
     value->content = NULL;
     value->tag = TAG_OCCUPY;
+    //printf("HTINSERT.....%ul\n", key);
     if (hashtable_insert(cache, key, value) == 0) {
       EXIT_TRACE("hashtable_insert failed");
     }
-//	fprintf(stderr, "%d: insert key %p\n", getpid(), key);
 #ifdef PARALLEL
     pthread_cond_init(&value->empty, NULL);
 #endif
@@ -277,16 +284,17 @@ send_buf_item * sub_ChunkProcess(data_chunk chunk) {
       EXIT_TRACE("Memory allocation failed.\n");
     }
     memcpy(item->sha1, key, sizeof(u_char)*SHA1_LEN);
-
+    
     item->type = TYPE_COMPRESS;
-    // In fact, body is just one field in the item, that includes the total information.
     item->str = (u_char *)body;
 
-  } else {
+  }
+  else {
     // cache hit: put the item into the queue for the write thread 
     struct pContent * value = ((struct pContent *)entry->v);
+    //printf("KEY %lu\n", *((unsigned long *)key));
+
     value->count += 1;
-    // LTP, it is weird since value is pointed to v. unnecessary at all.
     hashtable_change(entry, (void *)value);
 
     item = (send_buf_item *)malloc(sizeof(send_buf_item));
@@ -298,23 +306,27 @@ send_buf_item * sub_ChunkProcess(data_chunk chunk) {
     body->cid = chunk.cid;
     body->anchorid = chunk.anchorid;
     body->len = SHA1_LEN;
-    // What??? content is a key now but previous is the chunk itself?
-    // Also, if the chunk is already met, why we still need to handle this?
     item->content = key;
-	//sha1 is NULL now, not the key anymore?
     item->sha1 = NULL;
 
     item->type = TYPE_FINGERPRINT;
     item->str = (u_char *)body;
-
+    //printf("CACHE HIT %lu %p\n", key, item);
   }
 
 #ifdef PARALLEL
+  //printf("%d sub_chunck unlock\n", getpid());
   pthread_mutex_unlock(ht_lock);
+
+  /*if (*((unsigned long *)key) == 2202839138){
+    printf("UNLOCKED it!!! pid %d \n", getpid());
+    }*/
 #endif
 
   if (chunk.start) MEM_FREE(chunk.start);
-    
+
+
+  //printf("CHUNK NEW ITEM %p %lu ptr is %p %p pid %d, seq %d\n", item, *((unsigned long *)key), &item->sha1, item->sha1, getpid(), seq);    
   return item;
 }
 
@@ -325,28 +337,27 @@ send_buf_item * sub_ChunkProcess(data_chunk chunk) {
  */
 void * 
 ChunkProcess(void * targs) {
+  //printf("ChunkProcess %d\n", getpid());
+  fflush(stdout);
+  sleep(SLEEP_TIME);
   struct thread_args *args = (struct thread_args *)targs;
   const int qid = args->tid / MAX_THREADS_PER_QUEUE;
   data_chunk chunk;
   send_buf_item * item;
-  
-  fprintf(stderr, "%d : ChunkProcess\n", getpid()); 
 
   data_chunk * fetchbuf[CHUNK_ANCHOR_PER_FETCH];
   int fetch_count = 0, fetch_start = 0;
   
   send_buf_item * tmpbuf[ITEM_PER_INSERT];
   int tmp_count = 0;
+  int tmp2=0;
   send_buf_item * tmpsendbuf[ITEM_PER_INSERT];
   int tmpsend_count = 0;
-
-  // The input for this threads just come from the previous stage only. 
-  // Each thread just need to remember its qid only.
+  //printf("start....%d\n", getpid());
   while (1) {
     //if no items existing, fetch a group of items from the pipeline
     if (fetch_count == fetch_start) {
-	  //dequeue will cause current thread to hang on the queue. 
-      // When r < 0, means no data anymore. Current thread can exit now.
+      //printf("%d chunk deueue 5\n", getpid());
       int r = dequeue(&chunk_que[qid], &fetch_count, (void **)fetchbuf);
       if (r < 0) break;
 
@@ -354,7 +365,6 @@ ChunkProcess(void * targs) {
     }
     
     //get one item
-	//fprintf(stderr, "%d: %d item %p\n", getpid(), args->tid, chunk.start);
     chunk.start = fetchbuf[fetch_start]->start;
     chunk.len = fetchbuf[fetch_start]->len;    
     chunk.cid = fetchbuf[fetch_start]->cid;
@@ -363,19 +373,15 @@ ChunkProcess(void * targs) {
 
     if (chunk.start == NULL) break;
 
-    item = sub_ChunkProcess(chunk);
+    item = sub_ChunkProcess(chunk, tmp2);
 
-	// After sub_chunkprocess, we just got the item. 
-    // Start to handle the item according different type now.
     if (item->type == TYPE_COMPRESS) {
 
       tmpbuf[tmp_count] = item;
       tmp_count ++;
-     
-	  // We won't do insert every time, we will wait for ITEM_PER_INSERT.
-      // That means we can improve the performance???? Not sure, but we will
-      // decrease the number of communication since we use local buffer to cache all items. 
-      if (tmp_count >= ITEM_PER_INSERT) {      
+      tmp2++;
+      if (tmp_count >= ITEM_PER_INSERT) {     
+	//printf("%d enqueue 1\n", getpid());
         enqueue(&compress_que[qid], &tmp_count, (void **)tmpbuf);
       }
     } else {
@@ -383,21 +389,23 @@ ChunkProcess(void * targs) {
       tmpsend_count ++;
       
       if (tmpsend_count >= ITEM_PER_INSERT) {
+	//printf("%d enqueue 2\n", getpid());
         enqueue(&send_que[qid], &tmpsend_count, (void **)tmpsendbuf);
       }
     }
   }
- 
-  // There is no previous worker here, we should add remainning work to corresponding queue anyway. 
+  
   if (tmp_count > 0) {      
+    //printf("%d enqueue 3\n", getpid());
     enqueue(&compress_que[qid], &tmp_count, (void **)tmpbuf);
   }
     
   if (tmpsend_count > 0) {      
+    //printf("%d enqueue 4\n", getpid());
     enqueue(&send_que[qid], &tmpsend_count, (void **)tmpsendbuf);
   }
-
-  //Used to tell next stage that one more chunkProcess thread ends
+  //printf("end....%d\n", getpid());
+  //one more chunkProcess thread ends
   queue_signal_terminate(&compress_que[qid]);
     return NULL;
 }
@@ -412,13 +420,17 @@ FindAllAnchors(void * targs) {
   data_chunk * fetchbuf[MAX_PER_FETCH];
   int fetch_count = 0;
   int fetch_start = 0;
+
+  //printf("FindAllAnchors: %d\n", getpid());
+  fflush(stdout);
+  sleep(SLEEP_TIME);
   
-  fprintf(stderr, "%d : FindAllAnchors\n", getpid()); 
   u32int * rabintab = malloc(256*sizeof rabintab[0]);
   u32int * rabinwintab = malloc(256*sizeof rabintab[0]);
   if(rabintab == NULL || rabinwintab == NULL) {
     EXIT_TRACE("Memory allocation failed.\n");
   }
+
 
   data_chunk * tmpbuf[CHUNK_ANCHOR_PER_INSERT];
   int tmp_count = 0;
@@ -427,41 +439,36 @@ FindAllAnchors(void * targs) {
       data_chunk item;
       //if no item for process, get a group of items from the pipeline
       if (fetch_count == fetch_start) {
-		// Fetch some items from anchor_queue
-        int r = dequeue(&anchor_que[qid], &fetch_count, (void **)fetchbuf);
-	    // If r is -1, that means no item anymore??? 
+	//printf("%d find anchors dequeue\n", getpid());
+        int r = dequeue(&anchor_que[qid], &fetch_count, (void **)fetchbuf); 
+
         if (r < 0) {
           break;
         }
         
         fetch_start = 0;
       }
-         
-      // Fetch_start is used to identify first item that we can process. Fetch_count is 
-      // the number of items that we fetch from the queue 
+          
       if (fetch_start < fetch_count) {
           //get one item
           item.start = fetchbuf[fetch_start]->start;
           item.len = fetchbuf[fetch_start]->len;
           item.anchorid = fetchbuf[fetch_start]->anchorid;
-		  // What? We don't need to do this, since it is not a circular buffer. But there is no harm to do this???
           fetch_start = (fetch_start + 1)%MAX_PER_FETCH;
-               
+
           rabininit(rf_win, rabintab, rabinwintab);
-          
+
           u_char * p;
           
           u_int32 chcount = 0;
-          // First, anchor and p will have the same value in the beginning.
           u_char * anchor = item.start;
           p = item.start;
-		  // n is 60K in the beginning
           int n = MAX_RABIN_CHUNK_SIZE;
           while(p < item.start+item.len) {
-			// Check whether current item is smaller than specified size?
             if (item.len + item.start - p < n) {
               n = item.len +item.start -p;
             }
+
             //find next anchor
             p = p + rabinseg(p, n, rf_win, rabintab, rabinwintab);
           
@@ -471,10 +478,7 @@ FindAllAnchors(void * targs) {
               EXIT_TRACE("Memory allocation failed.\n");
             }
 
-			// Report some race condition here.
             tmpbuf[tmp_count]->start = (u_char *)malloc(p - anchor + 1);
-            //fprintf(stderr, "anchor %p to %p\n", tmpbuf[tmp_count]->start, tmpbuf[tmp_count]->start+(p - anchor + 1));
-
             if(tmpbuf[tmp_count]->start == NULL) {
               EXIT_TRACE("Memory allocation failed.\n");
             }
@@ -489,9 +493,10 @@ FindAllAnchors(void * targs) {
             tmp_count ++;                            
 
             if (tmp_count >= CHUNK_ANCHOR_PER_INSERT) {
+	      //printf("%d find anchors enqueue\n", getpid());
               enqueue(&chunk_que[qid], &tmp_count, (void **)tmpbuf);
             }
-              
+
             anchor = p;
           } 
 
@@ -504,7 +509,6 @@ FindAllAnchors(void * targs) {
             }
 
             tmpbuf[tmp_count]->start = (u_char *)malloc(item.start + item.len - anchor + 1);
-			
             if(tmpbuf[tmp_count] == NULL) {
               EXIT_TRACE("Memory allocation failed.\n");
             }
@@ -516,8 +520,9 @@ FindAllAnchors(void * targs) {
             memcpy(tmpbuf[tmp_count]->start, anchor, item.start + item.len -anchor);
             tmpbuf[tmp_count]->start[item.start + item.len -anchor] = 0;
             tmp_count ++;
-            
+
             if (tmp_count >= CHUNK_ANCHOR_PER_INSERT) {
+	      //printf("%d find anchors enqueue 2\n", getpid());
               enqueue(&chunk_que[qid], &tmp_count, (void **)tmpbuf);
             }
           }
@@ -527,6 +532,7 @@ FindAllAnchors(void * targs) {
     }  
 
     if (tmp_count > 0) {
+      //printf("%d find anchors enqueue 3\n", getpid());
       enqueue(&chunk_que[qid], &tmp_count, (void **)tmpbuf);
     }
 
@@ -538,6 +544,7 @@ FindAllAnchors(void * targs) {
     }*/
 
     //count the end thread
+
     queue_signal_terminate(&chunk_que[qid]);
   return NULL;
 }
@@ -553,7 +560,7 @@ SerialIntegratedPipeline(void * targs) {
   data_chunk * fetchbuf[MAX_PER_FETCH];
   int fetch_count = 0;
   int fetch_start = 0;
-
+  
   u32int * rabintab = malloc(256*sizeof rabintab[0]);
   u32int * rabinwintab = malloc(256*sizeof rabintab[0]);
   if(rabintab == NULL || rabinwintab == NULL) {
@@ -616,7 +623,7 @@ SerialIntegratedPipeline(void * targs) {
             memcpy(tmpbuf->start, anchor, p-anchor);
             tmpbuf->start[p-anchor] = 0;
               
-            senditem = sub_ChunkProcess(*tmpbuf);
+            senditem = sub_ChunkProcess(*tmpbuf, 0);
 
             if (senditem->type == TYPE_COMPRESS) {
               sub_Compress(senditem);
@@ -653,7 +660,7 @@ SerialIntegratedPipeline(void * targs) {
             tmpbuf->start[item.start + item.len -anchor] = 0;
             
   
-            senditem = sub_ChunkProcess(*tmpbuf);
+            senditem = sub_ChunkProcess(*tmpbuf, 0);
             
             if (senditem->type == TYPE_COMPRESS) {
               sub_Compress(senditem);
@@ -692,8 +699,11 @@ DataProcess(void * targs){
   u_long tmp;
   u_char * p;
   //int avg_bsize = 0;
-  fprintf(stderr, "%d : DataProcess\n", getpid()); 
+ 
   u_char * anchor;
+
+  //printf("forked 1\n"); 
+  //printf("DataProcess: %d\n", getpid());
   
   u_char * src = (u_char *)malloc(MAXBUF*2);
   u_char * left = (u_char *)malloc(MAXBUF);
@@ -776,12 +786,10 @@ DataProcess(void * targs){
       tmpbuf[tmp_count]->start[p-anchor] = 0;
       tmp_count ++;
 
-	  fprintf(stderr, "%d : try to enqueue\n", getpid());
-
       //send a group of items into the next queue in round-robin fashion
       if (tmp_count >= ANCHOR_DATA_PER_INSERT) { 
+	//printf("%d data process enqueue 1\n", getpid());
         enqueue(&anchor_que[qid], &tmp_count, (void **)tmpbuf);
-	  	fprintf(stderr, "%d : after enqueue 1\n", getpid());
         qid = (qid+1) % args->nqueues;
       }
 
@@ -792,6 +800,7 @@ DataProcess(void * targs){
   free(src);
 
   if (tmp_count >= 0) {
+    //printf("%d data process enqueue 2\n", getpid());
     enqueue(&anchor_que[qid], &tmp_count, (void **)tmpbuf);
     qid = (qid+1) % args->nqueues;
   }
@@ -817,7 +826,9 @@ SendBlock(void * targs)
   int fd = 0;
   struct hash_entry * entry; 
 
-  fd = open(conf->outfile, O_CREAT|O_TRUNC|O_WRONLY|O_TRUNC);
+  //printf("SendBlock: %d\n", getpid());
+
+  fd = open(conf->outfile, O_CREAT|O_TRUNC|O_WRONLY|O_TRUNC, O_RDWR);
   if (fd < 0) {
     perror("SendBlock open");
     return NULL;
@@ -914,7 +925,6 @@ SendBlock(void * targs)
 #endif
           }
         } else {
-		  //FIXME: LTP, if this happens, whether that means a race condition????? LTP
           printf("Error: Cannot find entry\n");
 #ifdef PARALLEL
           pthread_mutex_unlock(ht_lock);
@@ -1120,8 +1130,6 @@ Encode(config * conf)
   struct stat filestat;
 
   //queue allocation & initialization
-  // Here MAX_THREADS_PER_QUEUE is 4, that means we don't want too many threads 
-  // are contending for a queue, so we limit the number of threads that one queue can serve 
   const int nqueues = (conf->nthreads / MAX_THREADS_PER_QUEUE) +
                       ((conf->nthreads % MAX_THREADS_PER_QUEUE != 0) ? 1 : 0);
   chunk_que = malloc(sizeof(struct queue) * nqueues);
@@ -1177,8 +1185,8 @@ Encode(config * conf)
   enqueue(&send_que[0], &fetch_count_tmp, (void **)frombuf);
   */
    /* src file stat */
-  if (stat(conf->infile, &filestat) < 0) 
-      EXIT_TRACE("stat() %s failed: %s\n", conf->infile, strerror(errno));
+  if (stat(conf->infile, &filestat) < 0){}
+      //EXIT_TRACE("stat() %s failed: %s\n", conf->infile, strerror(errno));
 
     if (!S_ISREG(filestat.st_mode)) 
       EXIT_TRACE("not a normal file: %s\n", conf->infile);
@@ -1214,7 +1222,6 @@ Encode(config * conf)
     pthread_create(&threads_process, NULL, DataProcess, &data_process_args);
   }
 
-  fprintf(stderr, "%d: Check dataprocessing's memory now\n", getpid());
   int i;
 
   //Create 3 thread pools for the intermediate pipeline stages
@@ -1224,20 +1231,17 @@ Encode(config * conf)
     pthread_create(&threads_chunk[i], NULL, ChunkProcess, &chunk_thread_args[i]);
   }
 
-  fprintf(stderr, "%d: Creating chunkprocess\n", getpid());
   struct thread_args anchor_thread_args[conf->nthreads];
   for (i = 0; i < conf->nthreads; i ++) {
      anchor_thread_args[i].tid = i;
      pthread_create(&threads_anchor[i], NULL, FindAllAnchors, &anchor_thread_args[i]);
   }
-  fprintf(stderr, "%d: Find all anchors' process\n", getpid());
 
   struct thread_args compress_thread_args[conf->nthreads];
   for (i = 0; i < conf->nthreads; i ++) {
     compress_thread_args[i].tid = i;
     pthread_create(&threads_compress[i], NULL, Compress, &compress_thread_args[i]);
   }
-  fprintf(stderr, "%d: compress process\n", getpid());
 
   //thread for last pipeline stage (output)
   struct thread_args send_block_args;
@@ -1247,8 +1251,6 @@ Encode(config * conf)
   if (!conf->preloading) {
     pthread_create(&threads_send, NULL, SendBlock, &send_block_args);
   }
-  
-  fprintf(stderr, "%d: sending block process\n", getpid());
 
   /*** parallel phase ***/
 
@@ -1259,6 +1261,7 @@ Encode(config * conf)
 
  for (i = 0; i < conf->nthreads; i ++)
     pthread_join(threads_anchor[i], NULL);
+
 
   for (i = 0; i < conf->nthreads; i ++)
     pthread_join(threads_chunk[i], NULL);
@@ -1277,7 +1280,6 @@ Encode(config * conf)
     __parsec_roi_end();
 #endif
   }
-  fprintf(stderr, "doing process\n");
 
 #else //serial version
   struct thread_args generic_args;
@@ -1314,7 +1316,6 @@ Encode(config * conf)
   
 #endif //PARALLEL
 
-  fprintf(stderr, "dumping scan numbers\n");
   void dump_scannums();
   dump_scannums();
 

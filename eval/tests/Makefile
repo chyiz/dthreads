@@ -31,25 +31,21 @@ HOME = ..
 
 .PHONY: default all clean
 
-APPS := blackscholes
-
-#APPS := \
-#	blackscholes \
-#	ferret \
-#	freqmine \
-#	swaptions \
-#	canneal \
-#	dedup \
-#	streamcluster \
-#	fluidanimate \
-#	histogram \
-#	kmeans \
-#	linear_regression \
-#	matrix_multiply \
-#	pca \
-#	reverse_index \
-#	string_match \
-#	word_count \
+APPS := \
+	blackscholes \
+	ferret \
+	swaptions \
+	canneal \
+	dedup \
+	streamcluster \
+	histogram \
+	kmeans \
+	linear_regression \
+	matrix_multiply \
+	pca \
+	reverse_index \
+	string_match \
+	word_count \
 
 
 default: all

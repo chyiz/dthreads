@@ -1,10 +1,10 @@
 
-DTHREADS_HOME=../../..
+DTHREADS_HOME=../../../
 
 NCORES ?= 8
 
-CC = gcc -m32 -march=core2 -mtune=core2
-CXX = g++ -m32 -march=core2 -mtune=core2
+CC = gcc -g -m32 -march=core2 -mtune=core2
+CXX = g++ -g -m32 -march=core2 -mtune=core2
 #CC = gcc -march=core2 -mtune=core2
 #CXX = g++ -march=core2 -mtune=core2
 CFLAGS += -O5
@@ -51,7 +51,7 @@ eval-pthread: $(TEST_NAME)-pthread
 
 DTHREAD_CFLAGS = $(CFLAGS) -DNDEBUG
 #DTHREAD_LIBS += $(LIBS) -rdynamic $(DTHREADS_HOME)/src/libdthreads64.so -ldl
-DTHREAD_LIBS += $(LIBS) -rdynamic $(DTHREADS_HOME)/src/libdthreads32.so -ldl
+DTHREAD_LIBS += $(LIBS) -rdynamic -ldthreads32 -ldl
 
 DTHREAD_OBJS = $(addprefix obj/, $(addsuffix -dthread.o, $(TEST_FILES)))
 
