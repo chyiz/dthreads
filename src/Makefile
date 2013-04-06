@@ -6,7 +6,7 @@ DEPS = $(SRCS) $(INC_DIR)/xpersist.h $(INC_DIR)/xdefines.h $(INC_DIR)/xglobals.h
 
 INCLUDE_DIRS = -I$(INC_DIR) -I$(INC_DIR)/heaplayers -I$(INC_DIR)/heaplayers/util
 
-all: libdthreads32.so libdthreads64.so
+all: libdthreads32_cv.so libdthreads64_cv.so
 
 # 64bit version
 #CXX = g++ -march=core2 -mtune=core2 -msse3
@@ -25,14 +25,14 @@ CFLAGS64 = -march=core2 -mtune=core2 -msse3 -DSSE_SUPPORT -O3 -DNDEBUG -shared -
 
 LIBS = -ldl -lpthread
 
-libdthreads32.so: $(SRCS) $(DEPS) Makefile
-	$(CXX) $(CFLAGS32) $(INCLUDE_DIRS) $(SRCS) -o libdthreads32.so $(LIBS); \
-	cp libdthreads32.so /usr/local/lib;
+libdthreads32_cv.so: $(SRCS) $(DEPS) Makefile
+	$(CXX) $(CFLAGS32) $(INCLUDE_DIRS) $(SRCS) -o libdthreads32_cv.so $(LIBS); \
+	sudo cp libdthreads32_cv.so /usr/local/lib;
 
-libdthreads64.so: $(SRCS) $(DEPS) Makefile
-	$(CXX) $(CFLAGS64) $(INCLUDE_DIRS) $(SRCS) -o libdthreads64.so $(LIBS)
+libdthreads64_cv.so: $(SRCS) $(DEPS) Makefile
+	$(CXX) $(CFLAGS64) $(INCLUDE_DIRS) $(SRCS) -o libdthreads64_cv.so $(LIBS)
 
 
 clean:
-	rm -f libdthreads32.so libdthreads64.so 
+	rm -f libdthreads32_cv.so libdthreads64_cv.so 
 
