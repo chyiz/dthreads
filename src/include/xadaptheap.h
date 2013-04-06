@@ -40,6 +40,7 @@ public:
 		//void * buf = Source::malloc (metasize);
 		void * buf = mmap(NULL, metasize, PROT_READ | PROT_WRITE, MAP_SHARED
 				| MAP_ANONYMOUS, -1, 0);
+		cout << "xadaptheap meta size addr " << buf << " meta size " << metasize << endl;
 		if (buf == NULL) {
 			fprintf(stderr, "Failed to get memory to store the metadata\n");
 			exit(-1);

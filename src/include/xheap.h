@@ -36,7 +36,7 @@
 #include "xplock.h"
 #include "debug.h"
 
-template<unsigned long Size>
+template<int Size>
 class xheap: public xpersist<char, Size> {
 	typedef xpersist<char, Size> parent;
 
@@ -54,7 +54,6 @@ public:
 		// Since we don't know whether shareheap has been initialized here, just use mmap to assign
 		// one page to hold all data. We are pretty sure that one page is enough to hold all contents.
 		char * base;
-
 		// Allocate a share page to hold all heap metadata.
 		base = (char *) mmap(NULL, xdefines::PageSize, PROT_READ | PROT_WRITE,
 				MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -77,7 +76,6 @@ public:
 		*_position = (char *) _start;
 		*_remaining = parent::size();
 		*_magic = 0xCAFEBABE;
-
 		DEBUG("xheap initializing: _position %p, _remaining %p, _magic %p, _start %p, _end %p\n", _position, _remaining, _magic, _start, _end);
 	}
 
@@ -100,14 +98,11 @@ public:
 #endif
 
 		if (*_remaining == 0) {
-			fprintf(stderr, "Something very bad, maybe OUTOFMEMORY or memory corruption,  has happened: _start = %x, _position = %p, _remaining = %Zx.\n", *_start, *_position, *_remaining);
-			fprintf(stderr, "Try to change PROTECTEDHEAP_SIZEin xdefine.h to a bigger value\n");
-			exit(-1);
+			fprintf(stderr, "FOOP: something very bad has happened: _start = %x, _position = %p, _remaining = %Zx.\n", *_start, *_position, *_remaining);
 		}
 
 		if (*_remaining < sz) {
-			fprintf(stderr, "OUTOFMEMORY: remaining[%Zx], sz[%Zx] thread[%d], try to change PROTECTEDHEAP_SIZEin xdefine.h to a bigger value\n", *_remaining, sz, (int) pthread_self());
-			fprintf(stderr, "Try to change PROTECTEDHEAP_SIZEin xdefine.h to a bigger value\n");
+			fprintf(stderr, "CRAP: remaining[%Zx], sz[%Zx] thread[%d]\n", *_remaining, sz, (int) pthread_self());
 			exit(-1);
 		}
 		void * p = (void *)*_position;

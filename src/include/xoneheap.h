@@ -57,9 +57,27 @@ public:
     getHeap()->forceCommitOwnedPages(pid, end);
   }
 #endif
+
+  void merge_for_barrier(){
+    getHeap()->merge_for_barrier();
+  }
+
+  void settle_for_barrier(){
+    getHeap()->settle_for_barrier();
+  }
+
+  void update_for_barrier(){
+    getHeap()->update_for_barrier();
+  }
   
+
+
   void checkandcommit(bool update) {
     getHeap()->checkandcommit(update);
+  }
+
+  void clearUserInfo(void){
+    getHeap()->clearUserInfo();
   }
 
   void * getend(void) {

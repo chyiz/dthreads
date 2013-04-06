@@ -106,8 +106,8 @@ private:
 
 	typedef HL::ANSIWrapper<HL::StrictSegHeap<Kingsley::NUMBINS,
 			Kingsley::size2Class, Kingsley::class2Size, HL::AdaptHeap<
-					HL::SLList, NewSourceHeap<SourceHeap> >, NewSourceHeap<
-					HL::ZoneHeap<SourceHeap, chunky> > > > SuperHeap;
+								      HL::SLList, NewSourceHeap<SourceHeap> >, NewSourceHeap<
+														 HL::ZoneHeap<SourceHeap, chunky> > > > SuperHeap;
 
 public:
 	KingsleyStyleHeap(void) {
@@ -129,6 +129,12 @@ class PPHeap: public TheHeapType {
 public:
 
 	PPHeap(void) {
+
+	  //have we initialized the wrapped functions yet?
+	  if (!WRAP(pthread_mutex_init)){
+	    init_real_functions();
+	  }
+
 		/// The lock's attributes.
 		pthread_mutexattr_t attr;
 
@@ -148,34 +154,41 @@ public:
 		}
 		for (int i = 0; i < NumHeaps; i++) {
 			_lock[i] = (pthread_mutex_t *) ((intptr_t) base + sizeof(pthread_mutex_t) * i);
-			pthread_mutex_init(_lock[i], &attr);
+			WRAP(pthread_mutex_init)(_lock[i], &attr);
 		}
 	}
 
 	void * malloc(int ind, size_t sz) {
-		lock(ind);
-		// Try to get memory from the local heap first.
-		void * ptr = _heap[ind].malloc(sz);
-		
-		unlock(ind);
-		return ptr;
+	  //cout << getpid() << " size " << sz << endl;
+	  //printf("trying to acquire....%d\n", ind);
+	  //sleep(10);
+	  lock(ind);
+	  // Try to get memory from the local heap first.
+	  void * ptr = _heap[ind].malloc(sz);
+	  //printf("in malloc %p\n", ptr);
+	  unlock(ind);
+	  //printf("malloc unlocked %p\n", ptr);
+	  return ptr;
 	}
 
 	void free(int ind, void * ptr) {
-		lock(ind);
-		// Put the freed object onto this thread's heap.  Note that this
-		// policy is essentially pure private heaps, (see Berger et
-		// al. ASPLOS 2000), and so suffers from numerous known problems.
-		_heap[ind].free(ptr);
-		unlock(ind);
+	  lock(ind);
+	  //printf("free locked... %p\n", ptr);
+	  // Put the freed object onto this thread's heap.  Note that this
+	  // policy is essentially pure private heaps, (see Berger et
+	  // al. ASPLOS 2000), and so suffers from numerous known problems.
+	  _heap[ind].free(ptr);
+	  unlock(ind);
 	}
 
 	void lock(int ind) {
-		WRAP(pthread_mutex_lock)(_lock[ind]);
+	  //cout << "locking!!!!!!! " << ind << endl;
+	  WRAP(pthread_mutex_lock)(_lock[ind]);
 	}
 
 	void unlock(int ind) {
-		WRAP(pthread_mutex_unlock)(_lock[ind]);
+          //cout << "unlocking..." << endl;
+	  WRAP(pthread_mutex_unlock)(_lock[ind]);
 	}
 	
 private:

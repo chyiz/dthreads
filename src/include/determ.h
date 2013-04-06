@@ -35,6 +35,7 @@
 #include <signal.h>
 #endif
 
+#include "sync.h"
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +47,7 @@
 #include "internalheap.h"
 #include "real.h"
 #include "prof.h"
+#include "stats.h"
 
 #define MAX_THREADS 2048
 //#define fprintf(...) 
@@ -65,13 +67,19 @@ private:
   class ThreadEntry {
   public:
     inline ThreadEntry() {
-
+      WRAP(pthread_condattr_init)(&this->_condattr);
+      pthread_condattr_setpshared(&this->_condattr, PTHREAD_PROCESS_SHARED);
+      WRAP(pthread_cond_init)(&this->cond_child, &this->_condattr);
     }
 
     inline ThreadEntry(int tid, int threadindex) {
       this->tid = tid;
       this->threadindex = threadindex;
       this->wait = 0;
+      WRAP(pthread_condattr_init)(&this->_condattr);
+      pthread_condattr_setpshared(&this->_condattr, PTHREAD_PROCESS_SHARED);
+      WRAP(pthread_cond_init)(&this->cond_child, &this->_condattr);
+      
     }
 
     Entry * prev;
@@ -84,6 +92,10 @@ private:
     void * barrier;
     size_t wait;
     int joinee_thread_index;
+    pthread_cond_t token_cond;
+    pthread_mutex_t token_mutex;
+    pthread_cond_t cond_child;
+    pthread_condattr_t _condattr;
   };
 
   class LockEntry {
@@ -111,15 +123,16 @@ private:
   };
 
   // barrier entry
-  class BarrierEntry {
-  public:
-    volatile size_t maxthreads;
-    volatile size_t threads;
-    volatile bool arrival_phase;
-    void * orig_barr;
-    pthread_barrier_t real_barr;
-    Entry * head;
-  };
+   class BarrierEntry {
+   public:
+     volatile size_t maxthreads;
+     volatile size_t threads;
+     volatile bool arrival_phase;
+     void * orig_barr;
+     struct sync_spin_barrier spin_barrier;
+     pthread_barrier_t real_barr;
+     Entry * head;
+   };
 
   // Shared mutex and condition variable for all threads.
   // They are useful to synchronize among all threads.
@@ -127,6 +140,7 @@ private:
   pthread_cond_t cond;
   pthread_condattr_t _condattr;
   pthread_mutexattr_t _mutexattr;
+  pthread_mutexattr_t _mutexattr_tmp;
 
   // When one thread is created, it will wait until all threads are created.
   // The following two flag are used to indentify whether one thread can move on or not.
@@ -145,6 +159,9 @@ private:
   // When one thread is exited, the thread index can be reclaimed.
   ThreadEntry _entries[2048];
 
+  int _waiting_child_threads[MAX_THREADS];
+  int _waiting_child_count;
+
   // how much active thread in the system.
   size_t _maxthreadentries;
 
@@ -155,17 +172,37 @@ private:
 
   size_t _coresNumb;
   
+  //some optimizations for barriers may race, this helps avoid this
+  size_t _barrierUpdaters;
+
   // Variables related to token pass and fence control
   volatile ThreadEntry *_tokenpos;
   volatile size_t _maxthreads;
   volatile size_t _currthreads;
   volatile bool _is_arrival_phase;
   volatile size_t _alivethreads;
+  volatile size_t _total_wait_fence_num;
+
+  commit_stats * fence_wait_stats;
+
+  unsigned long total_time;
+  unsigned long total_commit_time;
+  unsigned long total_wait_time;
+  unsigned long commits;
+  unsigned long fence_wait_time;
 
   determ():
     _condnum(0),
     _barriernum(0),
+      _barrierUpdaters(0),
+      total_time(0),
+    total_commit_time(0),
+      total_wait_time(0),
+      fence_wait_time(0),
+    commits(0),
     _maxthreads(0),
+    _total_wait_fence_num(0),
+    _waiting_child_count(0),
     _currthreads(0),
     _is_arrival_phase(false),
     _alivethreads(0),
@@ -186,18 +223,26 @@ public:
       exit(-1);
     }
     
+
     // Set up with a shared attribute.
     WRAP(pthread_mutexattr_init)(&_mutexattr);
     pthread_mutexattr_setpshared(&_mutexattr, PTHREAD_PROCESS_SHARED);
+    WRAP(pthread_mutexattr_init)(&_mutexattr_tmp);
+    pthread_mutexattr_setpshared(&_mutexattr_tmp, PTHREAD_PROCESS_SHARED);
+
     WRAP(pthread_condattr_init)(&_condattr);
     pthread_condattr_setpshared(&_condattr, PTHREAD_PROCESS_SHARED);
 
+
     // Initialize the mutex.
     WRAP(pthread_mutex_init)(&_mutex, &_mutexattr);
+
     WRAP(pthread_cond_init)(&cond, &_condattr);
     WRAP(pthread_cond_init)(&_cond_parent, &_condattr);
     WRAP(pthread_cond_init)(&_cond_children, &_condattr);
     WRAP(pthread_cond_init)(&_cond_join, &_condattr);
+    //setup stats stuff
+    fence_wait_stats = new commit_stats();
   }
 
   static determ& getInstance(void) {
@@ -209,7 +254,9 @@ public:
     return * determObject;
   }
 
-  void finalize(void) {
+  void finalize(unsigned long token_time) {
+    cout << "totals fence " << fence_wait_time << " token " << token_time <<
+	 " commit " << total_commit_time << " total " << total_time << endl;
     WRAP(pthread_mutex_destroy)(&_mutex);
     WRAP(pthread_cond_destroy)(&cond);
     assert(_currthreads == 0);
@@ -231,6 +278,24 @@ public:
   // Increase the fence, not need to hold lock!
   void incrFence(int num) {
     _maxthreads += num;
+  }
+
+  void print_total_commit_time(){
+    cout << "total commit time: " << total_commit_time << " " << commits << endl;
+    cout << "total wait: " << total_wait_time << endl;
+  }
+
+  void add_total_wait_time(unsigned long usecs){
+    total_wait_time+=usecs;
+  }
+
+  void add_total_commit_time(unsigned long usecs){
+    total_commit_time+=usecs;
+    commits++;
+  }
+
+  void add_total_time(unsigned long usecs){
+    total_time+=usecs;
   }
 
   // Decrease the fence when one thread exits.
@@ -310,18 +375,38 @@ public:
     return (_maxthreads == 1 && _alivethreads == 1);
   }
 
+  //should hold the main lock() when calling this
+  void passTokenToNext(ThreadEntry * next){
+
+    assert(next != NULL);
+
+    //if(_maxthreads > _coresNumb) {
+    //WRAP(pthread_mutex_lock)(&next->token_mutex);
+    _tokenpos = next;
+      //cout << _tokenpos->threadindex << " tid: " << next->tid << " pid: " << getpid() << endl;
+      //WRAP(pthread_cond_signal)(&next->token_cond);
+      //WRAP(pthread_mutex_unlock)(&next->token_mutex);
+      //}
+      //else{
+      //_tokenpos = next;
+      //}
+  }
+
+
   // main function of waitFence and waitToken
   // Here, we are defining two different paths.
   // If the alive threads is smaller than the coresNumb, then we don't
   // use those condwait, but busy waiting instead.
   void waitFence(int threadindex, bool keepBitmap) {
+
     int rv;
     bool lastThread = false;
+
+    return;
 
     ThreadEntry * entry = &_entries[threadindex];
 
     lock();
-
     // Check whether all threads has passed previous arrival phase.
     if(_maxthreads <= _coresNumb && _is_arrival_phase != 1) {
       unlock();
@@ -338,13 +423,16 @@ public:
       }
     }
 
+
     // Now in an arrival phase, proceed with barrier synchronization
     _currthreads++;
    
     // Whenever all threads arrived in the barrier, wakeup everyone on the barrier. 
     if(_maxthreads <= _coresNumb) {
       if(_currthreads >= _maxthreads) {
+	_total_wait_fence_num++;
         _is_arrival_phase = false;
+	//cout << "DEBUG: fence " << threadindex << " total fences " << _total_wait_fence_num << endl;
         WRAP(pthread_cond_broadcast)(&cond);
       } else {
         unlock();
@@ -355,7 +443,9 @@ public:
       }
     } else {
       if(_currthreads >= _maxthreads) {
+	_total_wait_fence_num++;
         _is_arrival_phase = false;
+	//cout << "DEBUG: fence " << threadindex << " total fences " << _total_wait_fence_num << endl;
         WRAP(pthread_cond_broadcast)(&cond);
       } else {
         while(_is_arrival_phase == 1) {
@@ -370,29 +460,54 @@ public:
   
     // When all threads leave the barrier, entering into the new arrival phase.  
     if (_currthreads == 0) {
+      //cout << "DEBUG: left fence " << threadindex << " total fences " << _total_wait_fence_num << endl;
       _is_arrival_phase = true;
 
       // Cleanup the bitmap here.
       if(!keepBitmap)
         xbitmap::getInstance().cleanup();
-
+      //clear out the user data
+      xmemory::clearUserInfo();
       WRAP(pthread_cond_broadcast)(&cond);
     }
 
     unlock();
-
     return;
   }
   
-  void getToken(void) {
+  //  int __attribute__((optimize("O0"))) getToken(int threadindex) {
+  int getToken(int threadindex) {
+    int cond_result;
+    ThreadEntry * entry = &_entries[threadindex];
+    int spin_counter=0;
+
+    pid_t pid = getpid();
+
+    //WRAP(pthread_mutex_lock)(&entry->token_mutex);
+    //while (_tokenpos->threadindex != threadindex) {
+      //cout << "in cond wait, waiting for token " << getpid() << endl;
+      //cond_result = WRAP(pthread_cond_wait)(&entry->token_cond, &entry->token_mutex);
+    //}
+    
+    //need to wait before we continue for barrier folks that haven't called update yet.
+
     while (_tokenpos->tid != getpid()) {
       sched_yield();
       __asm__ __volatile__ ("mfence");
     }
+
+
+    while (_barrierUpdaters > 0) {
+      sched_yield();
+      __asm__ __volatile__ ("mfence");
+    }
+
+    
+    //WRAP(pthread_mutex_unlock)(&entry->token_mutex);
     DEBUG("%d: Got token after waitFence", _tokenpos->threadindex);
     PRINT_SCHEDULE("%d: Got token after waitFence", _tokenpos->threadindex);
     START_TIMER(serial);
-    return;
+    return 0;
   }
 
   void putToken(int threadindex) {
@@ -401,6 +516,7 @@ public:
 
 //    fprintf(stderr, "%d : putToken \n", threadindex);
     lock();
+
 
     // Sanity check, whether I have to right to call putToken.
     // Only token owner can put token.
@@ -412,11 +528,9 @@ public:
     next = (ThreadEntry *)(_tokenpos->next);
 
     if(next != NULL) {
+      passTokenToNext(next);
       DEBUG("%d : thread %d put token. Now token is passed to thread %d\n", getpid(), threadindex, next->threadindex);
       PRINT_SCHEDULE("thread %d put token and pass token to thread %d\n", threadindex, next->threadindex);
-    }
-    if(next != NULL) {
-      _tokenpos = next;
     }
     unlock();
   }
@@ -455,6 +569,9 @@ public:
     }
 
     entry->status = STATUS_READY;
+    
+    WRAP(pthread_mutex_init)(&entry->token_mutex, &_mutexattr);
+    WRAP(pthread_cond_init)(&entry->token_cond, &_condattr);
 
     // Add one entry according to their threadindex.
     insertTail((Entry *)entry, &_activelist);
@@ -462,14 +579,25 @@ public:
 
   // Those children are waiting on _cond_children when the parent is still
   // spawning new threads in order to guarantee the determinism.
-  inline void waitParentNotify(void) {
+  inline void waitParentNotify(int threadindex) {
+    fence_wait_stats->stats_pid_start();
+    struct timespec t1,t2;
+    clock_gettime(CLOCK_REALTIME, &t2);
     lock();
-
+    ThreadEntry * myentry = (ThreadEntry *)&_entries[threadindex];
     _childregistered = true;
     WRAP(pthread_cond_signal)(&_cond_parent);
+    _waiting_child_threads[_waiting_child_count]=threadindex;
+    _waiting_child_count++;
 
-    WRAP(pthread_cond_wait)(&_cond_children, &_mutex);
+    //cout << "pid: " << myentry->tid << "child sleeping time: " << t2.tv_sec << " sec " << t2.tv_nsec << " nsec " << endl;
+    WRAP(pthread_cond_wait)(&myentry->cond_child, &_mutex);
+    clock_gettime(CLOCK_REALTIME, &t1);
+    //cout << "time: " << (t1.tv_nsec - t2.tv_nsec)/1000 << endl;
+    //cout << "pid: " << myentry->tid << "woke up time: " << t1.tv_sec << " sec " << t1.tv_nsec << " nsec " << endl;
     unlock();
+    fence_wait_stats->stats_pid_end();
+    fence_wait_time+=fence_wait_stats->stats_get_pid_time();
   }
 
   // Parent should call this function. 
@@ -488,18 +616,26 @@ public:
   // Now wakeup all threads waiting on _cond_children when 
   // parent finishs the spawning. In fact, parent met some synchronizations points now.
   inline void notifyWaitingChildren(void) {
+    ThreadEntry * wakeupEntry;
     lock();
-    WRAP(pthread_cond_broadcast)(&_cond_children);
+    for (int i=0;i<_waiting_child_count;++i){
+	wakeupEntry = (ThreadEntry *)&_entries[_waiting_child_threads[i]];
+	WRAP(pthread_cond_signal)(&wakeupEntry->cond_child);
+    }
+    _waiting_child_count=0;
     unlock();
   }
+
 
   // Deterministic pthread_join
   inline bool join(int guestindex, int myindex, bool wakeup) {
     // Check whether I am holding the lock or not.
     assert (myindex == _tokenpos->threadindex);
 
+    struct timespec t1;
     ThreadEntry * joinee;
     ThreadEntry * myentry;
+    ThreadEntry * wakeupEntry;
     bool toWaitToken = false;
 
     lock();
@@ -511,7 +647,13 @@ public:
     // If join is the first synchronization point after spawning, 
     // wakeup all children waiting for the parent's notification.
     if(wakeup) {
-      WRAP(pthread_cond_broadcast)(&_cond_children);
+      for (int i=0;i<_waiting_child_count;++i){
+	wakeupEntry = (ThreadEntry *)&_entries[_waiting_child_threads[i]];
+	WRAP(pthread_cond_signal)(&wakeupEntry->cond_child);
+	clock_gettime(CLOCK_REALTIME, &t1);
+	//cout << " waking up time: " << t1.tv_sec << " sec " << t1.tv_nsec << " nsec " << endl;
+      }
+      _waiting_child_count=0;
     }
   
     // When the joinee is still alive, we should wait for the joinee to wake me up 
@@ -527,10 +669,12 @@ public:
     
     while(joinee->status != STATUS_EXIT) {    
       decrFence();
+      //cout << "DEBUG: decrFence 1 JOIN thread: " << myindex << " child " << guestindex << " fencesize " << _maxthreads << endl;
 
       // Pass the token to next thread if I am holding the token.
       if(_tokenpos->threadindex == myindex && _activelist != NULL) {
-        _tokenpos = (ThreadEntry *) (_tokenpos->next);
+        //_tokenpos = (ThreadEntry *) (_tokenpos->next);
+	passTokenToNext((ThreadEntry *)_tokenpos->next);
       } 
     
       // Waiting for the children's exit now.
@@ -543,6 +687,7 @@ public:
       // Increase total threads since current threads is waken.
       // Whenever this thread cannot run, ti will decrease fence immediately.
       incrFence(1);
+      //cout << "DEBUG: incrFence 1 JOIN thread: " << myindex << " child " << guestindex << " fencesize " << _maxthreads << endl;
     }
   
     // Cleanup the status.
@@ -555,12 +700,12 @@ public:
        
     if(toWaitToken) {
       // Wait for the token. 
-          while(_tokenpos->threadindex != myindex) {
+      /*while(_tokenpos->threadindex != myindex) {
               sched_yield();
               __asm__ __volatile__ ("mfence");
-          }
-
-          START_TIMER(serial);
+	      }*/      
+      getToken(myindex);
+      START_TIMER(serial);
     }
 
     return toWaitToken;
@@ -574,6 +719,7 @@ public:
 
     lock();
     DEBUG("%d: Deregistering", getpid());
+    //fence_wait_stats->stats_pid_print_time("waitFence");
 
     // Whether the parent is trying to join current thread now??
     if(parent->status == STATUS_JOINING && parent->joinee_thread_index == threadindex) {
@@ -592,9 +738,10 @@ public:
     if(_alivethreads > 0) {
       // Since this thread is running with the token, no need to modify 
       // _currthreads.
-           _alivethreads--;
-           decrFence();
-        }
+      _alivethreads--;
+      decrFence();
+      //cout << "DEBUG: decrFence DEREGISTER thread: " << threadindex << " fencesize " << _maxthreads << " alive threads " << _alivethreads << endl;
+    }
 
     nextentry = (ThreadEntry *)entry->next;
     assert(nextentry != entry);
@@ -606,8 +753,9 @@ public:
     // Passing the token to next thread in the activelist.
     // It is almost impossible that nextentry will be NULL, that means that
     // no one is active.
-        _tokenpos = nextentry;
-    
+    //_tokenpos = nextentry;
+    passTokenToNext(nextentry);
+
     DEBUG("%d: deregistering. Token is passed to %d\n", getpid(), (ThreadEntry *)_tokenpos->threadindex);
     PRINT_SCHEDULE("%d: deregistering. Token is passed to %d\n", threadindex, (ThreadEntry *)_tokenpos->threadindex);
     
@@ -639,11 +787,11 @@ public:
   // Since it is called without the token,
   // if no one uses this lock before, the caller cannot 
   // own the lock in order to guarantee the determinism. 
-  inline bool lock_isowner(void * mutex) {
+  inline bool lock_isowner(void * mutex, int * last_thread, int * total_users) {
     //fprintf(stderr, "%d: lock_isowner\n", getpid());  
     LockEntry * entry = (LockEntry *)getSyncEntry(mutex);
     //fprintf(stderr, "%d: lock_isowner with entry %p\n", getpid(), entry); 
-
+    //cout << "lock is owner " << entry->total_users << " last " << entry->last_thread << " current " << getpid() << endl;
     if(entry == NULL)
       return false;
   
@@ -654,10 +802,13 @@ public:
       int pid = getpid();
       if(entry->last_thread != pid) {
         entry->total_users++;
+	*last_thread=entry->last_thread;
         return false;
       } 
       return true;
     }
+    *last_thread=entry->last_thread;
+    *total_users=entry->total_users;
     return false;
   }
 
@@ -679,6 +830,7 @@ public:
     LockEntry * entry = (LockEntry *)getSyncEntry(mutex);
     bool result = true;
 
+    //cout << "calling lock acquire " << getpid() << " total users " << entry->total_users << endl;
     if(entry == NULL) {
        // fprintf(stderr, "%d: lock acquire 3 with mutex %p, entry %p\n", getpid(), mutex, entry);  
       entry = lock_init(mutex);
@@ -713,12 +865,22 @@ public:
       }
     }
   //  fprintf(stderr, "%d: lock acquire in the end, with last thread %d, total users %d and is_acquire %d\n", getpid(), entry->last_thread, entry->total_users, entry->is_acquired);  
+
     return result;
   }
 
   inline void lock_release(void * mutex) {
     LockEntry * entry = (LockEntry *)getSyncEntry(mutex);
     entry->is_acquired = false;
+  }
+
+  CondEntry * cond_get_entry_and_check(void * user_cond){
+    CondEntry * condentry = (CondEntry*)getSyncEntry(user_cond);
+    if (condentry==NULL){
+      xmemory::begin(true);
+      condentry = (CondEntry*)getSyncEntry(user_cond);
+    }
+    return condentry;
   }
 
   CondEntry * cond_init(void * cond) {
@@ -728,14 +890,13 @@ public:
     entry->head = NULL;
     entry->cond = cond;
   
-  //  xmemory::begin(true);
     //Set corresponding entry.
     setSyncEntry(cond, entry);
+    //cout << "init " << cond << " entry " << entry << endl;
 
     // Initialize the real conditional entry.
     WRAP(pthread_cond_init)(&entry->realcond, &_condattr);
 
-    //xmemory::commit(false);
     assert(entry->waiters == 0 || entry->head != NULL);
     return entry;
   }
@@ -752,15 +913,18 @@ public:
     unlock();
   }
 
-  void cond_wait(int threadindex, void * cond, void * thelock) {
+  void cond_wait(int threadindex, void * user_cond, void * thelock) {
+    lock();
     ThreadEntry * entry = &_entries[threadindex];
-    CondEntry * condentry = (CondEntry*)getSyncEntry(cond);
+    //CondEntry * condentry = (CondEntry*)getSyncEntry(user_cond);
+    CondEntry * condentry = cond_get_entry_and_check(user_cond);
     ThreadEntry * next;
+
     if (condentry == NULL) {
-      condentry = cond_init(cond);
+      condentry = cond_init(user_cond);
+      xmemory::commit(false);
     }
 
-    lock();
 
     assert(_tokenpos == entry);
 
@@ -781,9 +945,13 @@ public:
     entry->status = STATUS_COND_WAITING;
 
     decrFence();
+    /*cout << "DEBUG: decrFence COND_WAIT " << 
+    user_cond << " thread: " << threadindex << " fencesize " << _maxthreads << 
+    "waiters " << condentry->waiters << " condentry " << condentry << endl;*/
 
     // Release token to next active thread.
-    _tokenpos = next;
+    //_tokenpos = next;
+    passTokenToNext(next);
 
     // Wait until it is signaled (status are changed to STATUS_READY)
     // We are using busy wait method to avoid un-determinism caused by OS.
@@ -795,6 +963,7 @@ public:
       lock_release(thelock);
       WRAP(pthread_cond_wait)(&condentry->realcond, &_mutex);
     }
+
     //fprintf(stderr, "%d: cond_wait after wakingup\n", getpid());
 
     // Here, we don't need to wait on fence anymore because this can put current
@@ -819,7 +988,7 @@ public:
   }
 
   // Current thread are going to send out signal.
-  void cond_signal(void * cond) {
+  void cond_signal(void * cond, int threadindex) {
     CondEntry * condentry = (CondEntry*)getSyncEntry(cond);
 
     //fprintf(stderr, "%d: cond_signal cond %p\n", getpid(), condentry);
@@ -828,8 +997,9 @@ public:
     }
 
     // No need to wakeup if no one is waiting.
-    if (condentry->waiters == 0)
+    if (condentry->waiters == 0){
       return;
+    }
 
     lock();
 
@@ -849,9 +1019,12 @@ public:
 
     // We can increase the fence.
     incrFence(1);
+    //cout << "DEBUG: incrFence 1 COND_SIGNAL " << cond << " thread: " << threadindex << " fencesize " << _maxthreads << endl;
 
     // One less waiters for this condentry.
     condentry->waiters--;
+
+    //cout << "waking people up!!!! pid " << getpid() << " cond " << cond << endl;
 
     // Wakeup all waiters on this condentry.
     WRAP(pthread_cond_broadcast)(&condentry->realcond);
@@ -859,7 +1032,7 @@ public:
     unlock();
   }
 
-  void cond_broadcast(void * cond) {
+  void cond_broadcast(void * cond, int threadindex) {
     CondEntry * condentry = (CondEntry*)getSyncEntry(cond);
 
     if(condentry == NULL) {
@@ -869,11 +1042,11 @@ public:
     assert(condentry != NULL);
 
     // No need to wakeup if no one is waiting.
-    if (condentry->waiters == 0)
+    if (condentry->waiters == 0){
       return;
+    }
 
     int waiters = condentry->waiters;
-
     lock();
 
     ThreadEntry * entry = (ThreadEntry *) condentry->head;
@@ -890,6 +1063,7 @@ public:
 
     // Increment the fence
     incrFence(condentry->waiters);
+    //cout << "DEBUG: incrFence waiters COND_BROADCAST " << cond << " waiters " << condentry->waiters << " thread: " << threadindex << " fencesize " << _maxthreads << endl;
 
     // Now no waiters in this cond var. 
     condentry->waiters = 0;
@@ -914,10 +1088,12 @@ public:
     removeEntry((Entry *)entry, &_activelist);
     
     decrFence();
+    //cout << "DEBUG: decrFence SIG_WAIT thread: " << threadindex << " fencesize " << _maxthreads << endl;
     
     // Release token to next active thread.
-    _tokenpos = next;
-    
+    //_tokenpos = next;
+    passTokenToNext(next);
+
     unlock();
     
     ret = WRAP(sigwait)(set, sig);
@@ -939,7 +1115,9 @@ public:
   
     // Increment the fence.
     incrFence(1);
-    
+    //cout << "DEBUG: incrFence 1 SIG_WAIT thread: " << threadindex << " fencesize " << _maxthreads << endl;
+
+
     unlock();
   
     return 0;
@@ -954,6 +1132,9 @@ public:
       assert(0);
     }
 
+    entry->spin_barrier.max = count;
+    entry->spin_barrier.begin = count+1;
+    entry->spin_barrier.end = 0;
     entry->maxthreads = count;
     entry->threads = 0;
     entry->arrival_phase = true;
@@ -974,6 +1155,13 @@ public:
   void barrier_wait(void * bar, int threadindex) {
     BarrierEntry * barentry;
     bool lastThread = false;
+    int profile = 0;
+    struct timespec t1,t2,t3,t4,t5,t6,t7,t8,t9,t10;
+    
+    if (((unsigned long)bar) & 1){
+      profile=1;
+      bar=(pthread_barrier_t *)(((unsigned long)bar)^1);
+    }
 
     barentry = (BarrierEntry*)getSyncEntry(bar);
     assert(barentry != NULL);
@@ -991,6 +1179,7 @@ public:
     assert(_tokenpos == entry);
 
     (*threads)++;
+    //cout << getpid() << "at the barrier " << bar << " threads is " << *threads << " and max is " << *maxthreads << endl;
     // Whether I am the last one to enter into barrier?
     if (*threads == *maxthreads) {
       // Then we don't to remove this thread from activelist
@@ -998,7 +1187,9 @@ public:
       moveWholeList((Entry *) _tokenpos, &barentry->head);
 
       // Increment the fence.
+
       incrFence(*maxthreads - 1);
+      //cout << "DEBUG: incrFence BARRIER_WAIT barrier " << bar << " thread: " << threadindex << " fencesize " << _maxthreads << endl;
 
       // since normally I am the only one in the token ring,
       // we don't want to pass the token backto myself for fairness.
@@ -1021,11 +1212,13 @@ public:
       entry->status = STATUS_BARR_WAITING;
       entry->barrier = barentry;
       decrFence();
+      //cout << "DEBUG: decrFence BARRIER_WAIT barrier " << bar << " thread: " << threadindex << " fencesize " << _maxthreads << endl;
     }
 
     // Release token to next active thread.
-    _tokenpos = nextentry;
-  
+    //_tokenpos = nextentry;
+    passTokenToNext(nextentry);
+
     STOP_TIMER(serial);
 
     unlock();
@@ -1033,17 +1226,36 @@ public:
     // If I am not the last thread to enter the barrier,
     // Then I should let others to get the lock (in order to do other stuff).
     // If I am the last thread, don't do cleanup until after barrier.
-    if (!lastThread) {
+    /*if (!lastThread) {
       // We can do the atomicCommit safely. 
       // First, The token has been passed to others
       // Second, I am not in the token ring (can't be passed the token).
       // Then it won't cause deadlock anymore.
       xmemory::begin(true);
-    }
-    WRAP(pthread_barrier_wait)(&barentry->real_barr);
-    if (lastThread)
-      xmemory::begin(true);
+      }*/
 
+    if (barentry->maxthreads <= _coresNumb){
+      //printf("my barrier %d\n", barentry->spin_barrier.begin);
+      sync_spin_barrier_wait(&barentry->spin_barrier);
+      //WRAP(pthread_barrier_wait)(&barentry->real_barr);
+    }
+    else{
+      WRAP(pthread_barrier_wait)(&barentry->real_barr);
+    }
+
+    lock();
+    _barrierUpdaters++;
+    unlock();
+
+    //just update (already merged), no need to commit
+    //xmemory::begin(true);
+    clock_gettime(CLOCK_REALTIME,&t1);
+    xmemory::update_for_barrier();
+    clock_gettime(CLOCK_REALTIME,&t2);
+    add_total_commit_time(time_util_time_diff(&t1,&t2));
+    lock();
+    _barrierUpdaters--;
+    unlock();
   }
 
   void barrier_destroy(void * bar) {
@@ -1096,6 +1308,7 @@ private:
   void * getSyncEntry(void * entry) {
     void ** ptr = (void **)entry;
 //    fprintf(stderr, "%d: entry %p and synentry 0x%x\n", getpid(), entry, ((int *)entry));   
+    //printf("entry %p\n", entry);
     return(*ptr);
   }
 
@@ -1109,7 +1322,7 @@ private:
 
     //fprintf(stderr, "origentry %p dest %p *dest %p newentry %p\n", origentry, dest, *dest, newentry);
     // Update the shared copy in the same time. 
-    xmemory::mem_write(dest, newentry);
+    //xmemory::mem_write(dest, newentry);
   }
 
   void clearSyncEntry(void * origentry) {

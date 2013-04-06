@@ -45,44 +45,44 @@ runtime_data_t *global_data;
 static bool initialized = false;
 
 void initialize() {
-	DEBUG("intializing libdthread");
-
-	init_real_functions();
-
-	global_data = (runtime_data_t*)mmap(NULL, xdefines::PageSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-
-	global_data->thread_index = 1;
-	DEBUG("after mapping global data structure");
-	xrun::initialize();
-	initialized = true;
+  DEBUG("intializing libdthread");
+  
+  init_real_functions();
+  
+  global_data = (runtime_data_t*)mmap(NULL, xdefines::PageSize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  
+  global_data->thread_index = 1;
+  DEBUG("after mapping global data structure");
+  xrun::initialize();
+  initialized = true;
 }
 
 void finalize() {
 	DEBUG("finalizing libdthread");
 	initialized = false;
-	//xrun::finalize();
-	fprintf(stderr, "\nStatistics information:\n");
-	PRINT_TIMER(serial);
+	xrun::done();
+	//fprintf(stderr, "\nStatistics information:\n");
+	//PRINT_TIMER(serial);
 	PRINT_COUNTER(commit);
-	PRINT_COUNTER(twinpage);
-	PRINT_COUNTER(suspectpage);
-	PRINT_COUNTER(slowpage);
-	PRINT_COUNTER(dirtypage);
-	PRINT_COUNTER(lazypage);
-	PRINT_COUNTER(shorttrans);
+	//PRINT_COUNTER(twinpage);
+	//PRINT_COUNTER(suspectpage);
+	//PRINT_COUNTER(slowpage);
+	//PRINT_COUNTER(dirtypage);
+	//PRINT_COUNTER(lazypage);
+	//PRINT_COUNTER(shorttrans);
 }
 
 extern "C" {
 
 void * malloc(size_t sz) {
 	void * ptr;
+
 	if (!initialized) {
 		DEBUG("Pre-initialization malloc call forwarded to mmap");
 		ptr = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	} else {
 		ptr = xrun::malloc(sz);
 	}
-
 	if (ptr == NULL) {
 		fprintf(stderr, "%d: Out of memory!\n", getpid());
 		::abort();
@@ -219,6 +219,7 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex) {
 int pthread_mutex_unlock(pthread_mutex_t *mutex) {
 	if(initialized) {
 		xrun::mutex_unlock(mutex);
+		//printf("done!!! %d\n", getpid());
 	}
 	return 0;
 }

@@ -46,9 +46,12 @@ typedef struct runtime_data {
 
 extern runtime_data_t *global_data;
 
+#define PERSIST_COMMIT_NORMAL 0
+#define PERSIST_COMMIT_MERGE_ONLY 2
+#define PERSIST_COMMIT_UPDATE_ONLY 3
+
 class xdefines {
 public:
-
   enum { STACK_SIZE = 1024 * 1024 } ; // 1 * 1048576 };
   enum { PROTECTEDHEAP_SIZE = 1048576UL * 800}; // FIX ME 512 };
   enum { PROTECTEDHEAP_CHUNK = 10485760 };
@@ -59,18 +62,6 @@ public:
   enum { PAGE_SIZE_MASK = (PageSize-1) };
   enum { NUM_HEAPS = 32 }; // was 16
   enum { LOCK_OWNER_BUDGET = 10 };
-
-  /*  enum { STACK_SIZE = 1024 * 1024 } ; // 1 * 1048576 };
-  //enum { PROTECTEDHEAP_SIZE = 1048576UL * 2048}; // FIX ME 512 };
-  enum { PROTECTEDHEAP_SIZE = 1048576UL * 4096}; // FIX ME 512 };
-  enum { PROTECTEDHEAP_CHUNK = 10485760 };
-  
-  enum { MAX_GLOBALS_SIZE = 1048576UL * 40 };
-  enum { INTERNALHEAP_SIZE = 1048576UL * 100 }; // FIXME 10M 
-  enum { PageSize = 4096UL };
-  enum { PAGE_SIZE_MASK = (PageSize-1) };
-  enum { NUM_HEAPS = 32 }; // was 16
-  enum { LOCK_OWNER_BUDGET = 10 };*/
 };
 
 #endif

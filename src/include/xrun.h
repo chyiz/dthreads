@@ -55,6 +55,10 @@
 
 #include "debug.h"
 
+#include "time_util.h"
+
+#include "stats.h"
+
 class xrun {
 
 private:
@@ -66,6 +70,26 @@ private:
   static size_t _children_threads_count;
   static size_t _lock_count;
   static bool _token_holding;
+  static struct timespec fence_start;
+  static struct timespec fence_end;
+  static int fence_total_us;
+  static struct timespec token_start;
+  static struct timespec token_end;
+  static int token_total_us;
+  static commit_stats * token_stats;
+  static commit_stats * fence_stats;
+  static commit_stats * barrier_stats;
+  static commit_stats * mutex_stats;
+  static commit_stats * atomic_begin_stats;
+  static commit_stats * atomic_end_stats;
+  static commit_stats * getlock_count;
+  static int free_count;
+  static int commit_count;
+  static struct timespec ts1;
+  static struct timespec ts2;
+  
+
+
 #ifdef TIME_CHECKING
   static struct timeinfo tstart;
 #endif
@@ -81,6 +105,18 @@ public:
     _children_threads_count = 0;
     _lock_count = 0;
     _token_holding = false;
+    fence_total_us = 0;
+    token_total_us = 0;
+    free_count = 0;
+    commit_count=0;
+
+    token_stats = new commit_stats();
+    fence_stats = new commit_stats();
+    barrier_stats = new commit_stats();
+    mutex_stats = new commit_stats();
+    atomic_begin_stats = new commit_stats();
+    atomic_end_stats = new commit_stats();
+    getlock_count = new commit_stats();
 
     pid_t pid = syscall(SYS_getpid);
 
@@ -106,6 +142,11 @@ public:
       fprintf(stderr, "xrun reinitialized");
       ::abort();
     }
+    clock_gettime(CLOCK_REALTIME, &ts1);
+  }
+
+  static void done(void){
+    determ::getInstance().finalize(token_stats->stats_pid_aggregate());
   }
 
   // Control whether we will protect memory or not.
@@ -127,6 +168,11 @@ public:
 
   static void finalize(void) {
     xmemory::finalize();
+    clock_gettime(CLOCK_REALTIME, &ts2);
+    //ignore the first thread
+    if (_thread_index > 0){
+      determ::getInstance().add_total_time(time_util_time_diff(&ts1,&ts2));
+    }
   }
 
   // @ Return the main thread's id.
@@ -143,7 +189,8 @@ public:
   // Now only the current thread is active.
   static inline int childRegister(int pid, int parentindex) {
     int threads;
-
+    struct timespec t1,t2;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
     // Get the global thread index for this thread, which will be used internally.
     _thread_index = xatomic::increment_and_return(&global_data->thread_index);
     _lock_count = 0;
@@ -163,13 +210,15 @@ public:
     // We should cleanup all blocks information inherited from the parent.
     xmemory::cleanupOwnedBlocks();
   #endif
+    clock_gettime(CLOCK_MONOTONIC, &t2);
+    //cout << "childRegister: " << time_util_time_diff(&t1,&t2) << endl;
 
     return (_thread_index);
   }
 
   // New created threads are waiting until notify by main thread.
   static void waitParentNotify(void) {
-    determ::getInstance().waitParentNotify();
+    determ::getInstance().waitParentNotify(_thread_index);
   }
 
   static inline void waitChildRegistered(void) {
@@ -182,10 +231,12 @@ public:
 #ifdef LAZY_COMMIT 
     xmemory::finalcommit(false);
 #endif
-
-    DEBUG("%d: thread %d deregister, get token\n", getpid(), _thread_index);
+    //determ::getInstance().print_total_commit_time();
+    //DEBUG("%d: thread %d deregister, get token\n", getpid(), _thread_index);
     atomicEnd(false);
     // Remove current thread and decrease the fence
+    //cout << "fence " << fence_total_us << " token " << token_total_us << endl;
+    //cout << "thread wait pid " << getpid() << " " << fence_stats->stats_get_pid_time() + token_stats->stats_get_pid_time() << endl;
     determ::getInstance().deregisterThread(_thread_index);
   }
 
@@ -218,7 +269,7 @@ public:
       openMemoryProtection();
       atomicBegin(true);
     }
-      
+ 
     atomicEnd(false);
 
 #ifdef LAZY_COMMIT 
@@ -241,7 +292,6 @@ public:
     }
 
     _children_threads_count++;
-       
     void * ptr = xthread::spawn(fn, arg, _thread_index);
 
     // Start a new transaction
@@ -269,6 +319,7 @@ public:
     if(_fence_enabled) {
       waitToken();
     }
+    
     
     atomicEnd(false);
 #ifdef LAZY_COMMIT 
@@ -368,7 +419,15 @@ public:
 
   /* Heap-related functions. */
   static inline void * malloc(size_t sz) {
+    char * tmp = NULL;
+    //cout << "asking malloc for " << sz << " pid " << getpid() << endl;
     void * ptr = xmemory::malloc(sz);
+    //if (ptr){
+      //tmp=(char *)(*((unsigned long *)ptr));
+    //}
+    //if (ptr){
+      //cout << "malloc size: " << sz << " result " << ptr << " pid " << getpid() << " next " << *((unsigned long *)ptr) << endl;
+    //}
     //fprintf(stderr, "%d : malloc sz %d with ptr %p\n", _thread_index, sz, ptr);
     return ptr;
   }
@@ -381,6 +440,8 @@ public:
 
   // In fact, we can delay to open its information about heap.
   static inline void free(void * ptr) {
+    //cout << "freeing " << ptr << " count " << free_count << endl;
+    free_count++;
     xmemory::free(ptr);
   }
 
@@ -437,14 +498,16 @@ public:
     assert(_fence_enabled != true);
 
     // We start fence only if we are have more than two processes.
-    assert(_children_threads_count != 0);
+    //assert(_children_threads_count != 0);
 
+    if (_children_threads_count>0){
     // Start fence.   
     determ::getInstance().startFence(_children_threads_count);
 
     _children_threads_count = 0;
 
     _fence_enabled = true;
+    }
   }
 
   static void waitFence(void) {
@@ -453,10 +516,22 @@ public:
 
   // New optimization here.
   // We will add one parallel commit phase before one can get token.
-  static void waitToken(void) {
-    determ::getInstance().waitFence(_thread_index, true);
-
-    determ::getInstance().getToken();
+  static int waitToken(void) {
+    struct timespec t1,t2;
+    int spin_counter=0;
+    fence_stats->stats_pid_start();
+    //determ::getInstance().waitFence(_thread_index, true);
+    fence_stats->stats_pid_end();
+    clock_gettime(CLOCK_REALTIME, &t1);
+    //cout << "pid " << getpid() << " wait start s: " << t1.tv_sec << " ns: " << t1.tv_nsec <<  endl;
+    token_stats->stats_pid_start();
+    spin_counter=determ::getInstance().getToken(_thread_index);
+    token_stats->stats_pid_end();
+    clock_gettime(CLOCK_REALTIME, &t2);
+    //cout << "pid " << getpid() << " wait done s: " << t2.tv_sec << " ns: " 
+    //	 << t2.tv_nsec << " diff: " << time_util_time_diff(&t1,&t2) << endl;
+    determ::getInstance().add_total_wait_time(time_util_time_diff(&t1,&t2));
+    return spin_counter;
   }
 
   // If those threads sending out condsignal or condbroadcast,
@@ -490,8 +565,10 @@ public:
     // the transaction in the beginning and close the transaction
     // when lock_count equals to 0. 
     _lock_count++;
-    
-    if(determ::getInstance().lock_isowner(mutex) || determ::getInstance().isSingleWorkingThread()) {
+    int last_thread=888;
+    int total_users=999;
+
+    if(determ::getInstance().lock_isowner(mutex, &last_thread, &total_users) || determ::getInstance().isSingleWorkingThread()) {
       // Then there is no need to acquire the lock.
       bool result = determ::getInstance().lock_acquire(mutex);
       if(result == false) {   
@@ -501,11 +578,13 @@ public:
     }
     else {
 getLockAgain:
+      getlock_count->stats_pid_inc();
       // If we are not holding the token, trying to get the token in the beginning.
       if(!_token_holding) {
         waitToken();
+	mutex_stats->stats_pid_start();
         _token_holding = true;
-        atomicEnd(false);
+	atomicEnd(false);
   //      atomicEnd(true);
         atomicBegin(true);
       }
@@ -523,10 +602,11 @@ getLockAgain:
         // Current thread simply pass the token and wait for
         // next run.
         //atomicEnd(true);
-        atomicEnd(false);
+	atomicEnd(false);
+	cout << "pid " << getpid() << "no lock " << endl;
         putToken();
-        atomicBegin(true);
         waitFence();
+        atomicBegin(true);
         _token_holding = false;
         goto getLockAgain; 
       }
@@ -535,13 +615,16 @@ getLockAgain:
   }
 
   static void mutex_unlock(pthread_mutex_t * mutex) {
+
     if (!_fence_enabled)
       return;
 
+    
+
     // Decrement the lock account 
     _lock_count--;
-
     
+    //barrier_stats->stats_pid_register();
     // Unlock current lock.
     determ::getInstance().lock_release(mutex);
 
@@ -552,12 +635,16 @@ getLockAgain:
     //if(_lock_count == 0 && _token_holding && !determ::getInstance().isSingleWorkingThread())
     if(_lock_count == 0 && _token_holding)
     {
-        atomicEnd(false);
-        putToken();
-        _token_holding = false;
-
-        atomicBegin(true);
-        waitFence();
+      mutex_stats->stats_pid_end();
+      atomicEnd(false);
+      
+      //cout << getpid() << " released lock " << endl;
+      putToken();
+      _token_holding = false;
+      
+      waitFence();
+      atomicBegin(true);
+      //cout << getpid() << " release done " << endl;
     }
   }
 
@@ -568,22 +655,44 @@ getLockAgain:
 
   // Add the barrier support.
   static int barrier_wait(pthread_barrier_t *barrier) {
-    if (!_fence_enabled) {
-      if(_children_threads_count == 0) {
-        return 0;
-      }
-      else {
-        startFence();
+    struct timespec t1,t2,t3,t4;
+    int spin_counter=0;
+    int barrier_debug=0;
+    if (!_fence_enabled)
+      return 0;
+    clock_gettime(CLOCK_REALTIME,&t1);
+    spin_counter=waitToken();
+    clock_gettime(CLOCK_REALTIME,&t2);
 
-        // Waking up all waiting children
-        determ::getInstance().notifyWaitingChildren();
-      }
+    if (((unsigned long)barrier) & 1){
+      barrier_debug=1;
+      printf("found one\n");
     }
+    //merge first (no updates)
+    clock_gettime(CLOCK_REALTIME,&t1);
+    xmemory::merge_for_barrier();
+    xmemory::settle_for_barrier();
+    clock_gettime(CLOCK_REALTIME,&t2);
+    determ::getInstance().add_total_commit_time(time_util_time_diff(&t1,&t2));
 
-    //fprintf(stderr, "%d : barier wait\n", getpid());
-    waitToken();
-    atomicEnd(false);
+    //atomicEnd(false);
+    //xmemory::barrier_commit();
+
+    barrier_stats->stats_pid_start();
+    clock_gettime(CLOCK_REALTIME,&t3);
     determ::getInstance().barrier_wait(barrier, _thread_index);
+    clock_gettime(CLOCK_REALTIME,&t4);
+    barrier_stats->stats_pid_end();
+
+    if (barrier_debug){
+      printf("pid %d token: %lu, spin: %d, barrier %lu arrive s: %lu ns: %lu:\n token s: %lu ns: %lu\n barrier1 s: %lu ns: %lu\n barrier2: s: %lu ns: %lu\n\n", 
+	     getpid(),
+	     time_util_time_diff(&t1,&t2), spin_counter, time_util_time_diff(&t3,&t4), 
+	     t1.tv_sec, t1.tv_nsec, 
+	     t2.tv_sec, t2.tv_nsec, 
+	     t3.tv_sec, t3.tv_nsec, 
+	     t4.tv_sec, t4.tv_nsec);
+    }
 
     return 0;
   }
@@ -593,7 +702,6 @@ getLockAgain:
     int ret;
     waitToken();
     atomicEnd(false);
-    
     ret = determ::getInstance().sig_wait(set, sig, _thread_index);
     if(ret == 0) {
       atomicBegin(true);
@@ -605,7 +713,7 @@ getLockAgain:
   static void cond_wait(void * cond, void * lock) {
     // corresponding lock should be acquired before.
     assert(_token_holding == true);
-    //assert(determ::getInstance().lock_is_acquired() == true);
+    //assert(determ::getInstance().lock_isacquired() == true);
     atomicEnd(false);
     // We have to release token in cond_wait, otherwise
     // it can cause deadlock!!! Some other threads
@@ -625,7 +733,7 @@ getLockAgain:
     }
 
     atomicEnd(false);
-    determ::getInstance().cond_broadcast(cond);
+    determ::getInstance().cond_broadcast(cond, _thread_index);
     atomicBegin(true);
     
     if(!_token_holding) {
@@ -644,7 +752,7 @@ getLockAgain:
       
     atomicEnd(false);
     //fprintf(stderr, "%d: cond_signal\n", getpid());
-    determ::getInstance().cond_signal(cond);
+    determ::getInstance().cond_signal(cond, _thread_index);
     atomicBegin(true);
       
     if(!_token_holding) {
@@ -662,19 +770,45 @@ getLockAgain:
 
     // Now start.
     xmemory::begin(cleanup);
+
+    //cout << "atomic begin " << getpid() << endl;
+    //xmemory::printCurrentDirty();
   }
+
+  /*  static void atomicEndProfile(bool updateOnly){
+    struct timespec t1,t2;
+    fflush(stdout);
+    if (!_protection_enabled)
+      return;
+    ++commit_count;
+    clock_gettime(CLOCK_REALTIME,&t1);
+    xmemory::commit(PERSIST_COMMIT_NORMAL, !updateOnly);
+    clock_gettime(CLOCK_REALTIME,&t2);
+    cout << "commit total time...." << time_util_time_diff(&t1,&t2) << endl;
+    determ::getInstance().add_total_commit_time(time_util_time_diff(&t1,&t2));
+    }*/
+
 
   /// @brief End a transaction, aborting it if necessary.
   static void atomicEnd(bool update) {
     // Flush the stdout.
+    struct timespec t1,t2;
     fflush(stdout);
 
     if (!_protection_enabled)
       return;
-  
+    //cout << "atomic end" << endl;
+    //xmemory::printCurrentDirty();
     // Commit all private modifications to shared mapping
+    ++commit_count;
+    clock_gettime(CLOCK_REALTIME,&t1);
     xmemory::commit(update);
+    clock_gettime(CLOCK_REALTIME,&t2);
+    //cout << "pid " << getpid() << " commit total time...." << time_util_time_diff(&t1,&t2) << endl;
+    determ::getInstance().add_total_commit_time(time_util_time_diff(&t1,&t2));
   }
+
+
 };
 
 #endif

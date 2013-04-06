@@ -75,7 +75,7 @@ public:
     DEBUG("initializing xmemory");
     // Intercept SEGV signals (used for trapping initial reads and
     // writes to pages).
-    installSignalHandler();
+    //installSignalHandler();
 
     // Call _pheap so that xheap.h can be initialized at first and then can work normally.
     _pheap.initialize();
@@ -125,6 +125,11 @@ public:
     return _pheap.getSize(ptr);
   }
 
+  static void clearUserInfo(void){
+    _globals.clearUserInfo();
+    _pheap.clearUserInfo();
+  }
+
   static void openProtection(void) {
     _globals.openProtection(NULL);
     _pheap.openProtection(_pheap.getend());
@@ -150,16 +155,22 @@ public:
   }
 
   static inline void handleWrite(void * addr) {
-    if (_pheap.inRange(addr)) {
-      _pheap.handleWrite(addr);
-    } else if (_globals.inRange(addr)) {
-      _globals.handleWrite(addr);
-    }
-    else {
-      // None of the above - something is wrong.
-      fprintf(stderr, "%d: wrong faulted address\n", getpid()); 
-      assert(0);
-    }
+    
+  }
+
+  static inline void merge_for_barrier(){
+    _pheap.merge_for_barrier();
+    _globals.merge_for_barrier();
+  }
+
+  static inline void settle_for_barrier(){
+    _pheap.settle_for_barrier();
+    _globals.settle_for_barrier();
+  }
+
+  static inline void update_for_barrier(){
+    _pheap.update_for_barrier();
+    _globals.update_for_barrier();
   }
 
   static inline void commit(bool update) {
@@ -202,9 +213,11 @@ public:
       xmemory::handleWrite(addr);
     } else if (siginfo->si_code == SEGV_MAPERR) {
       fprintf (stderr, "%d : map error with addr %p!\n", getpid(), addr);
+      cout << "ABORT" << endl;
       ::abort();
     } else {
       fprintf (stderr, "%d : other access error with addr %p.\n", getpid(), addr);
+      cout << "ABORT" << endl;
       ::abort();
     }
   }
@@ -268,3 +281,4 @@ public:
 };
 
 #endif
+//08048710q
