@@ -94,7 +94,7 @@ public:
       memcpy(tmp, (Type *)startaddr, startsize);
     }
 
-    snap_memory = conv_open(NElts * sizeof(Type), _backingFname, (startaddr)?startaddr:NULL);
+    snap_memory = conv_checkout_create(NElts * sizeof(Type), _backingFname, (startaddr)?startaddr:NULL, 0);
 
     //cout << "start addr " << startaddr << " " << snap_memory->segment << endl;
     if (startaddr && tmp){
