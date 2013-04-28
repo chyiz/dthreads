@@ -156,10 +156,12 @@ int sched_yield(void) {
 }
 
 void pthread_exit(void * value_ptr) {
-	if(initialized) {
-		xrun::threadDeregister();
-	}
-	_exit(0);
+  cout << "EXIT " << getpid() << endl;
+  if(initialized) {
+    xrun::threadDeregister();
+  }
+  cout << "EXIT 2 " << getpid() << endl;
+  _exit(0);
 }
 
 int pthread_cancel(pthread_t thread) {
