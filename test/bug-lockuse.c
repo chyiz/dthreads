@@ -29,9 +29,12 @@ int main(int argc,char**argv)
 {
 	const int nThreads = 8;
 	pthread_t waiters[nThreads];
+	int thread_id[nThreads];
 	int i;
-	for(i = 0; i < nThreads; i++)
-	  pthread_create (&waiters[i], NULL, child_thread, (void *)(&i));
+	for(i = 0; i < nThreads; i++){
+	  thread_id[i]=i;
+	  pthread_create (&waiters[i], NULL, child_thread, (void *)&(thread_id[i]));
+	}
 
 	for(i = 0; i < nThreads; i++)
 		pthread_join (waiters[i], NULL);
