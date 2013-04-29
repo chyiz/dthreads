@@ -31,6 +31,7 @@ HOME = ..
 
 .PHONY: default all clean
 
+
 APPS := \
 	blackscholes \
 	ferret \

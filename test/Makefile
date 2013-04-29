@@ -1,6 +1,6 @@
-LIBS = -lm -lrt -ldl
-CFLAGS = -m32 -Wall -g -O3 
-CV_DTHREAD_LIBS = $(LIBS) -lksnap -rdynamic ../src/libdthreads32_cv.so
+LIBS = -lm -ldl
+CFLAGS = -m32 -Wall -g -O3 -Wl,-Tdata,0x80a8000
+CV_DTHREAD_LIBS = $(LIBS) -rdynamic ../src/libdthreads32_cv.so -lksnap -lrt
 PTHREAD_LIBS = $(LIBS) -lpthread
 
 all:

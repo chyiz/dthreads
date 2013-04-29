@@ -10,7 +10,7 @@ function usage(){
 	echo "-b : a comma delimited list of programs we want to run. Options are: " 
 	printf "\tdedup,blacksholes,ferret,canneal,streamcluster\n";
 	echo "-l : a comma delimited list of libraries to experiment with. The options are:";
-	printf "\tpthread,dthread,cvdthread\n";
+	printf "\tpthread,dthread,dthread_cv\n";
 	echo "-t : number of tests to do per program";
 	printf "\n\n\n"
 }
@@ -50,8 +50,8 @@ do
 		rm /tmp/$prog"_"$lib &> /dev/null;
 		for test in `seq 1 $tests`
 		do
-			(time ./$prog"-"$lib $args) 1> /dev/null 2> /tmp/eval_results;
-			cat /tmp/eval_results | grep "real" | awk -F 'm' '{print $2}' >> /tmp/$prog"_"$lib
+			(time ./$prog"-"$lib $args) #1> /dev/null 2> /tmp/eval_results;
+			#cat /tmp/eval_results | grep "real" | awk -F 'm' '{print $2}' >> /tmp/$prog"_"$lib
 		done
 		cat /tmp/$prog"_"$lib;
 	#leave that directory

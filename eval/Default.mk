@@ -9,7 +9,7 @@ CXX = g++ -g -m32 -march=core2 -mtune=core2
 #CXX = g++ -march=core2 -mtune=core2
 CFLAGS += -O5
 
-CONFIGS = pthread dthread
+CONFIGS = dthread_cv
 #CONFIGS = pthread dthread dmp_o dmp_b
 PROGS = $(addprefix $(TEST_NAME)-, $(CONFIGS))
 
@@ -51,7 +51,7 @@ eval-pthread: $(TEST_NAME)-pthread
 
 DTHREAD_CFLAGS = $(CFLAGS) -DNDEBUG
 #DTHREAD_LIBS += $(LIBS) -rdynamic $(DTHREADS_HOME)/src/libdthreads64.so -ldl
-DTHREAD_LIBS += $(LIBS) -rdynamic -ldthreads32 -ldl
+DTHREAD_LIBS += $(LIBS) -rdynamic -ldl
 
 DTHREAD_OBJS = $(addprefix obj/, $(addsuffix -dthread.o, $(TEST_FILES)))
 
@@ -69,11 +69,17 @@ obj/%-dthread.o: %.cpp
 
 ### FIXME, put the 
 $(TEST_NAME)-dthread: $(DTHREAD_OBJS) $(DTHREADS_HOME)/src/libdthreads32.so
-	$(CC) $(DTHREAD_CFLAGS) -o $@ $(DTHREAD_OBJS) $(DTHREAD_LIBS)
+	$(CC) $(DTHREAD_CFLAGS) -o $@ $(DTHREAD_OBJS) $(DTHREAD_LIBS) -ldthreads32
 
 eval-dthread: $(TEST_NAME)-dthread
 	time ./$(TEST_NAME)-dthread $(TEST_ARGS)
 #	time ./$(TEST_NAME)-dthread $(TEST_ARGS) &> /dev/null
+
+$(TEST_NAME)-dthread_cv: $(DTHREAD_OBJS)
+	$(CC) $(DTHREAD_CFLAGS) -Wl,-Tdata,0x80a8000 -o $@ $(DTHREAD_OBJS) $(DTHREAD_LIBS) $(DTHREADS_HOME)/src/libdthreads32_cv.so -lksnap -lrt
+
+eval-dthread_cv:
+	time ./$(TEST_NAME)-dthread $(TEST_ARGS)
 
 ############ coredet generic defines ############
 

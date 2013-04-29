@@ -31,6 +31,7 @@ void delay (void) {
 
 void * pick_even(void * para)
 {
+
   int i;
   struct pair_compare * cur = (struct pair_compare *)para;
   for (i=cur->lower; i<= cur->upper; i++) {
