@@ -648,14 +648,16 @@ public:
     // wakeup all children waiting for the parent's notification.
     if(wakeup) {
       for (int i=0;i<_waiting_child_count;++i){
+	cout << "join determ 1 " << endl;
 	wakeupEntry = (ThreadEntry *)&_entries[_waiting_child_threads[i]];
+	cout << "join determ 2 " << endl;
 	WRAP(pthread_cond_signal)(&wakeupEntry->cond_child);
 	clock_gettime(CLOCK_REALTIME, &t1);
 	//cout << " waking up time: " << t1.tv_sec << " sec " << t1.tv_nsec << " nsec " << endl;
       }
       _waiting_child_count=0;
     }
-  
+    cout << "join determ 3 " << endl;
     // When the joinee is still alive, we should wait for the joinee to wake me up 
     if(joinee->status != STATUS_EXIT) {
       // Remove myself from the token queue.
@@ -666,20 +668,20 @@ public:
       myentry->joinee_thread_index = guestindex;
     }
   
-    
+    cout << "join determ 4 " << endl;
     while(joinee->status != STATUS_EXIT) {    
       decrFence();
       //cout << "DEBUG: decrFence 1 JOIN thread: " << myindex << " child " << guestindex << " fencesize " << _maxthreads << endl;
-
+      cout << "join determ 5 " << endl;
       // Pass the token to next thread if I am holding the token.
       if(_tokenpos->threadindex == myindex && _activelist != NULL) {
         //_tokenpos = (ThreadEntry *) (_tokenpos->next);
 	passTokenToNext((ThreadEntry *)_tokenpos->next);
       } 
-    
+      cout << "join determ 6 " << endl;
       // Waiting for the children's exit now.
       WRAP(pthread_cond_wait)(&_cond_join, &_mutex);
-
+      cout << "join determ 7 " << endl;
       // When the parent is waken, it should get token immediately then it could 
       // put token later. For simplicity, all pthread_join should hold the token.
       toWaitToken = true;
@@ -692,12 +694,12 @@ public:
   
     // Cleanup the status.
     myentry->status = STATUS_READY;
-  
+    cout << "join determ 8 " << endl;
     DEBUG("%d: pthread_join, pass token to %d before unlock\n", _tokenpos->threadindex);
     PRINT_SCHEDULE("%d: pthread_join, pass token to %d before unlock\n", _tokenpos->threadindex);
 
     unlock(); 
-       
+    cout << "join determ 9 " << endl;
     if(toWaitToken) {
       // Wait for the token. 
       /*while(_tokenpos->threadindex != myindex) {
