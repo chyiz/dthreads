@@ -226,6 +226,7 @@ public:
   }
 
   static inline void threadDeregister(void) {
+    cout << "deregister " << getpid() << endl;
     waitToken();
 
 #ifdef LAZY_COMMIT 
@@ -320,7 +321,6 @@ public:
       waitToken();
     }
     
-    cout << "join 0" << endl;
     atomicEnd(false);
 #ifdef LAZY_COMMIT 
     xmemory::finalcommit(true);
@@ -330,12 +330,9 @@ public:
       startFence();
       wakeupChildren = true;
     }
-    cout << "join 1" << endl;
-
     // Get the joinee's thread index.
     child_threadindex = xthread::getThreadIndex(v);
 
-    cout << "join 2" << endl;
 
     // When child is not finished, current thread should wait on cond var until child is exited.
     // It is possible that children has been exited, then it will make sure this.
