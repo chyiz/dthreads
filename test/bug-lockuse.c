@@ -36,5 +36,6 @@ int main(int argc,char**argv)
 	for(i = 0; i < nThreads; i++)
 		pthread_join (waiters[i], NULL);
 
+	printf("\n\n");
 	return 0;
 }
