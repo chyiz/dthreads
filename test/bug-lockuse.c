@@ -16,7 +16,8 @@ void * child_thread(void * data)
 		
 	/* Do 1ms computation work. */
 	unit_work();
-		
+	printf("%d ", *((int *)data));
+
 	/* Page access */		
 	pthread_mutex_unlock(&g_lock);
 
@@ -30,7 +31,7 @@ int main(int argc,char**argv)
 	pthread_t waiters[nThreads];
 	int i;
 	for(i = 0; i < nThreads; i++)
-		pthread_create (&waiters[i], NULL, child_thread, NULL);
+	  pthread_create (&waiters[i], NULL, child_thread, (void *)(&i));
 
 	for(i = 0; i < nThreads; i++)
 		pthread_join (waiters[i], NULL);
