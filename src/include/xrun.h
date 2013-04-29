@@ -226,7 +226,6 @@ public:
   }
 
   static inline void threadDeregister(void) {
-    cout << "deregister " << getpid() << endl;
     waitToken();
 
 #ifdef LAZY_COMMIT 
